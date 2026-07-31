@@ -1,0 +1,19 @@
+# Normalise line endings so the repository stores LF regardless of whether a
+# commit is made from Windows, WSL, or Linux. Without this, the same file can
+# appear entirely rewritten in a diff purely because of CRLF/LF differences.
+* text=auto eol=lf
+
+# Source and configuration: always LF in the repository and in the working tree,
+# since these are read by Glue, Lambda, and Terraform on Linux.
+*.tf    text eol=lf
+*.hcl   text eol=lf
+*.py    text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.json  text eol=lf
+*.md    text eol=lf
+*.csv   text eol=lf
+*.txt   text eol=lf
+
+# Excel workbooks are binary; never apply line-ending conversion to them.
+*.xlsx  binary

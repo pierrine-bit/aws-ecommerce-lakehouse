@@ -35,18 +35,15 @@ with retries, quarantined rejects, and email alerting on failure.
                   EventBridge  →  SNS  →  email
 ```
 
-Stages run sequentially, each conditional on the one before it. Rows failing
-validation branch out of the ETL into `rejected/` with a reason attached. Raw
-files are archived only after the curated tables are confirmed non-empty, so a
-failed run leaves the source data untouched and retryable.
+Stages run sequentially, each conditional on the one before it. Raw files are
+archived only after the curated tables are confirmed non-empty, so a failed run
+leaves the source data untouched and retryable.
 
 **Design notes**
 
 - **Delta Lake** rather than plain Parquet, so `MERGE` makes re-runs idempotent.
 - **Rejects are quarantined, not dropped** — data defects are usually upstream
   problems worth investigating.
-- **The quality gate runs as a 1-DPU Python shell job**, since it only performs S3
-  and Catalog metadata calls, not distributed compute.
 - **The Athena row check is `SELECT 1 / COUNT(*)`**, so an empty table surfaces
   through the retry/catch machinery already in place.
 
@@ -87,8 +84,9 @@ explicit schema, normalise types, assert required columns, split valid from
 invalid on null keys and business rules, check referential integrity,
 deduplicate, then `MERGE` into Delta and register in the Catalog.
 
-**Quality gate** (Glue Python shell) asserts that each table has a Delta
-transaction log, is registered in the Catalog, and has a commit no older than
+**Quality gate** runs on 1 DPU as a Glue Python shell job, since it only makes S3
+and Catalog metadata calls. It asserts that each table has a Delta transaction
+log, is registered in the Catalog, and has a commit no older than
 `max_data_age_hours`. The freshness check matters most: presence alone would pass
 on a log left by a previous run even if today's wrote nothing.
 
@@ -218,12 +216,12 @@ a deliberate manual step.
 bootstrap/           one-time S3 state backend
 data/                source datasets
 glue_scripts/        Spark ETL and quality-gate jobs
-lambda/              raw-zone archival function
+lambda/              archival handler code
 tests/               unit tests for both job modules
 alerts.tf            SNS topic and EventBridge failure rules
 glue.tf              Glue jobs, database, crawler, Athena workgroup
 iam.tf               least-privilege roles and policies
-lambda.tf            archival function
+lambda.tf            archival function resource
 main.tf              S3 bucket, hardening, lifecycle, uploads
 step_functions.tf    state machine definition
 versions.tf          provider constraints and S3 backend

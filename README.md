@@ -4,11 +4,17 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Terraform](https://img.shields.io/badge/Terraform-%E2%89%A5%201.10-7B42BC)](versions.tf)
 
-A lakehouse for e-commerce transaction data, provisioned end to end with
-Terraform. It validates raw product, order, and order-item files, materialises
-ACID Delta Lake tables on S3, registers them for SQL access through Athena, and
-archives consumed source files — orchestrated by one Step Functions state machine
-with retries, quarantined rejects, and email alerting on failure.
+A batch lakehouse for e-commerce transaction data, provisioned end to end with
+Terraform. Raw product, order, and order-item files are schema-validated,
+deduplicated, and merged into ACID Delta Lake tables on S3, registered in the
+Glue Data Catalog for Athena, then archived once the curated layer is verified.
+
+The engineering emphasis is on **trust rather than throughput**. A pipeline that
+moves data is straightforward; one whose output can be relied on without manual
+inspection is not. Every stage is gated on its predecessor, invalid rows are
+quarantined with their rejection reason instead of filtered away, and the raw
+zone is only cleared after the curated tables have been independently proven to
+hold queryable data.
 
 ---
 
@@ -35,31 +41,51 @@ with retries, quarantined rejects, and email alerting on failure.
                   EventBridge  →  SNS  →  email
 ```
 
-Stages run sequentially, each conditional on the one before it. Raw files are
-archived only after the curated tables are confirmed non-empty, so a failed run
-leaves the source data untouched and retryable.
+Stages execute sequentially, each conditional on the one before it. Any failure
+short-circuits to a terminal state, which is itself an observable event.
 
-**Design notes**
+**Guarantees the design provides**
 
-- **Delta Lake** rather than plain Parquet, so `MERGE` makes re-runs idempotent.
-- **Rejects are quarantined, not dropped** — data defects are usually upstream
-  problems worth investigating.
-- **The Athena row check is `SELECT 1 / COUNT(*)`**, so an empty table surfaces
-  through the retry/catch machinery already in place.
+- **Idempotent re-runs.** `MERGE` on business keys means replaying a batch
+  converges on the same tables rather than duplicating rows.
+- **Fail-closed archival.** Raw files move only once the curated tables are
+  proven present, catalogued, fresh, and non-empty. A failed run leaves the
+  source data exactly where it was.
+- **No silent data loss.** Every rejected row is persisted with a reason and
+  timestamp, so a quality problem is diagnosable after the fact.
+- **Contained blast radius.** Each component assumes its own role; the archival
+  Lambda holds no read access to the curated zone.
+
+---
+
+## Engineering decisions
+
+| Decision | Rationale | Accepted cost |
+| -------- | --------- | ------------- |
+| Delta Lake over plain Parquet | Batches can legitimately resend an order; `MERGE` upserts on the business key make re-runs idempotent | A Delta runtime dependency, and small-file growth without scheduled `OPTIMIZE` |
+| Quarantine rejects rather than drop them | Data defects are usually upstream problems; filtering destroys the evidence needed to fix them | Storage cost, and the rejects need monitoring to become an active signal |
+| Quality gate as a 1-DPU Python shell job | It performs only S3 and Catalog metadata calls, so a Spark cluster would sit idle | Cannot inspect row-level distributions — presence and freshness only |
+| Row check via `SELECT 1 / COUNT(*)` | Division by zero makes emptiness surface through the retry/catch machinery already in place, with no extra stage | The failure reads as an arithmetic error until you know the idiom |
+| Optional stages omitted, not skipped | Disabling the crawler or row check rewires the preceding `Next`, so the deployed machine reflects what actually runs | The definition is assembled via `jsonencode`/`jsondecode`, which is less direct to read |
+| Native S3 state locking | Terraform 1.10's `use_lockfile` removes the DynamoDB lock table entirely | Hard floor of Terraform ≥ 1.10 for every contributor |
 
 ---
 
 ## Data model
 
 Sources: `products.csv`, `orders_apr_2025.xlsx`, `order_items_apr_2025.xlsx`.
-Schemas are declared explicitly, never inferred, so upstream drift fails at read
-time rather than propagating into the curated layer.
+Schemas are declared explicitly rather than inferred, so an upstream rename or
+type drift fails loudly at read time instead of propagating downstream.
 
 | Table | Merge key | Partitioned by | Referential integrity |
 | ----- | --------- | -------------- | --------------------- |
 | `products` | `product_id` | `department` | — |
 | `orders` | `order_id` | `order_date` | — |
 | `order_items` | `id` | `order_date` | `product_id` → `products`, `order_id` → `orders` |
+
+Partition columns follow the dominant access patterns — product analysis by
+department, revenue by date — so Athena prunes partitions instead of scanning
+whole tables.
 
 ```text
 raw/                 landing zone
@@ -70,29 +96,36 @@ scripts/             job code
 athena-results/      query output
 ```
 
-The bucket enforces versioning, SSE-S3 encryption, and a public-access block.
-Lifecycle rules expire `archived/`, `rejected/`, and noncurrent versions on
-configured schedules.
+The bucket enforces versioning, SSE-S3 encryption, and a full public-access
+block. Lifecycle rules bound growth on `archived/`, `rejected/`, noncurrent
+versions, and abandoned multipart uploads.
 
 ---
 
 ## Pipeline
 
-**ETL** (Glue Spark) processes products, then orders, then order items — the last
-validated against the two tables written before it. Per dataset: read with an
-explicit schema, normalise types, assert required columns, split valid from
-invalid on null keys and business rules, check referential integrity,
-deduplicate, then `MERGE` into Delta and register in the Catalog.
+**ETL** — Glue 4.0 Spark on two `G.1X` workers. Datasets are processed in
+dependency order, products through orders to order items, the last validated
+against the two tables written before it. Per dataset: read against an explicit
+schema, normalise types so unparseable numerics become SQL `NULL` rather than
+`NaN`, assert required columns, split valid from invalid on null business keys
+and business rules, resolve referential integrity by semi- and anti-join,
+deduplicate on the merge key, then `MERGE` into Delta and register in the
+Catalog. Read, rejected, and written counts are logged per dataset, making a
+run's lineage reconstructable from CloudWatch alone.
 
-**Quality gate** runs on 1 DPU as a Glue Python shell job, since it only makes S3
-and Catalog metadata calls. It asserts that each table has a Delta transaction
-log, is registered in the Catalog, and has a commit no older than
-`max_data_age_hours`. The freshness check matters most: presence alone would pass
-on a log left by a previous run even if today's wrote nothing.
+**Quality gate** — a 1-DPU Glue Python shell job asserting that each table holds
+a Delta transaction log, is registered in the Catalog, and carries a commit no
+older than `max_data_age_hours`. Freshness is the load-bearing check: presence
+alone would pass on a transaction log left by a previous successful run, even if
+today's run wrote nothing at all.
 
-**Orchestration** (Step Functions) retries Glue tasks with exponential backoff,
-retries the Lambda on transient errors, tolerates an already-running crawler, and
-routes every other error to a terminal failure state that raises an alert.
+**Orchestration** — a STANDARD state machine with layered resilience. Glue tasks
+retry twice with exponential backoff, the Lambda three times on the
+AWS-recommended transient error set, and the crawler stage catches
+`Glue.CrawlerRunningException` and proceeds rather than failing a run because a
+previous crawl is still finishing. Every other error routes to a terminal failure
+state, so no path is unhandled.
 
 ---
 
@@ -122,12 +155,12 @@ link AWS sends before alerts arrive.
 ## Getting started
 
 Requires Terraform ≥ 1.10 (for `use_lockfile` state locking), AWS CLI v2, and
-Python 3.11 if you want to run the tests.
+Python 3.11 to run the tests.
 
 ### 1. Bootstrap the state backend
 
-One-time setup of the bucket holding Terraform state. Its name must match the
-`backend "s3"` block in `versions.tf`.
+One-time creation of the versioned, encrypted bucket holding Terraform state. Its
+name must match the `backend "s3"` block in `versions.tf`.
 
 ```bash
 cd bootstrap
@@ -192,10 +225,20 @@ pip install -r requirements-dev.txt
 pytest -q
 ```
 
-Both job modules keep their transformation logic separate from the Glue argument
-resolution, so the logic is testable without a live Glue context. Spark tests skip
-automatically when PySpark or a JVM is missing. CI runs the tests, then
-`terraform fmt -check`, `init -backend=false`, and `validate` on every push.
+Both job modules separate their transformation logic from the Glue argument
+resolution. Since `awsglue` exists only inside a live Glue job, that split is
+what makes the business logic testable at all — the suite exercises the real
+functions against a local Spark session and mocked AWS clients rather than a
+deployed environment. Spark tests skip when PySpark or a JVM is absent, so the
+suite stays runnable locally while executing in full in CI.
+
+Dependencies are declared in `requirements-dev.txt` rather than inline in the
+workflow: an undeclared dependency that happens to be installed on a workstation
+is precisely what turns a green local run into a red pipeline.
+
+CI runs the tests first, so a logic regression fails fast, then
+`terraform fmt -check`, `init -backend=false` — no AWS credentials needed — and
+`terraform validate`.
 
 ---
 
@@ -205,8 +248,9 @@ automatically when PySpark or a JVM is missing. CI runs the tests, then
 terraform destroy
 ```
 
-The state bucket carries `prevent_destroy` and survives by design; removing it is
-a deliberate manual step.
+The state bucket carries `prevent_destroy` and survives by design, since it must
+outlive the environments whose state it holds. Removing it is a deliberate manual
+step.
 
 ---
 
@@ -229,7 +273,11 @@ versions.tf          provider constraints and S3 backend
 
 ## Known limitations
 
-Ingestion is batch and manually triggered. XLSX parsing happens on the Spark
-driver, so it does not scale to files beyond driver memory. The state bucket name
-is hard-coded, as Terraform forbids variables in backend blocks. Delta `OPTIMIZE`
-and `VACUUM` are not scheduled.
+Ingestion is batch and manually triggered; an S3 notification or schedule would
+make it event-driven. XLSX parsing happens on the Spark driver, so it does not
+scale beyond driver memory — converting sources to CSV or Parquet upstream would
+remove the ceiling. The state bucket name is hard-coded, as Terraform forbids
+variables in backend blocks; partial backend configuration would make it portable
+across accounts. The gate validates presence and freshness but not distributions,
+and Delta `OPTIMIZE`/`VACUUM` are unscheduled, so small files accumulate over
+many incremental runs.

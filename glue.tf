@@ -93,7 +93,10 @@ resource "aws_glue_crawler" "delta_crawler" {
 
 resource "aws_athena_workgroup" "lakehouse" {
   name = "${local.name}-athena"
-  tags = local.tags
+  # Athena treats a workgroup holding query-execution history as non-empty and
+  # refuses to delete it, so teardown needs the recursive delete option.
+  force_destroy = true
+  tags          = local.tags
 
   configuration {
     enforce_workgroup_configuration = true

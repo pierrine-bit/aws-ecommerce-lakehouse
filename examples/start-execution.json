@@ -1,0 +1,4 @@
+{
+  "source": "manual-simulation",
+  "description": "Simulates raw e-commerce file arrival in S3. Terraform uploads products, orders, and order_items into the raw zone."
+}

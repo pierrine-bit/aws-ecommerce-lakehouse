@@ -1,0 +1,9 @@
+aws_region   = "eu-west-1"
+project_name = "ecommerce-lakehouse"
+# bucket_name = "your-globally-unique-ecommerce-lakehouse-bucket"
+# crawler_enabled           = true
+# athena_validation_enabled = true
+# archive_retention_days    = 90
+# rejected_retention_days   = 30
+# max_data_age_hours        = 24
+# alert_email               = "you@example.com"

@@ -1,0 +1,11 @@
+# Test-only dependencies. The Glue jobs run against the runtimes AWS provides;
+# these exist so `pytest` can import the job modules and exercise their logic
+# locally and in CI against the same Spark/Delta pairing the ETL job uses.
+#
+# boto3 is required at import time by both glue_scripts modules, so the test
+# suite cannot even be collected without it.
+boto3
+pandas
+pyspark==3.5.1
+delta-spark==3.1.0
+pytest

@@ -20,7 +20,9 @@ provider "aws" {
 resource "aws_s3_bucket" "tf_state" {
   bucket = var.state_bucket_name
   # Protect the state bucket from accidental `terraform destroy` in this
-  # bootstrap config - it must outlive the main project's lifecycle.
+  # bootstrap config - it must outlive the main project's lifecycle. Removing
+  # it is a deliberate act: drop this block, or delete the bucket via the API,
+  # which this guard does not constrain.
   lifecycle {
     prevent_destroy = true
   }

@@ -1,5 +1,9 @@
 # E-Commerce Lakehouse on AWS
 
+[![CI](https://github.com/pierrine-bit/aws-ecommerce-lakehouse/actions/workflows/ci.yml/badge.svg)](https://github.com/pierrine-bit/aws-ecommerce-lakehouse/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Terraform](https://img.shields.io/badge/Terraform-%E2%89%A5%201.10-7B42BC)](versions.tf)
+
 A production-grade lakehouse for e-commerce transaction data, provisioned end to
 end as Infrastructure as Code. The platform ingests raw product, order, and order
 line-item files, enforces schema and business-rule validation, materialises

@@ -115,6 +115,11 @@ failing or timing out, whether the pipeline invoked it or someone ran it by hand
 The second rule matters because a manually triggered job failure would otherwise
 be silent.
 
+**Observability** — Glue and Step Functions each write to a dedicated CloudWatch
+log group with 14-day retention, and the state machine logs at `ALL` with
+execution data included. The ETL logs read, rejected, and written row counts per
+dataset, so a run's lineage is reconstructable from the logs alone.
+
 ---
 
 ## Security
@@ -168,6 +173,10 @@ aws stepfunctions describe-execution --execution-arn $ARN \
 A first run takes several minutes, most of it Glue cluster start-up. `status`
 moves from `RUNNING` to `SUCCEEDED`; anything else means a stage failed and the
 Step Functions execution history names which.
+
+Re-running is safe — the merge is idempotent. Note that a successful run archives
+the raw zone, so re-processing the same batch means restoring the files from
+`archived/<timestamp>/` or re-uploading them first.
 
 ---
 

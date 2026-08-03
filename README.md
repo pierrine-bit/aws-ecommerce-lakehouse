@@ -114,8 +114,13 @@ failure state that raises an alert.
 
 Requires Terraform ≥ 1.10, AWS CLI v2, and Python 3.11 for the tests.
 
+Terraform forbids variables in `backend` blocks, so the state bucket name is
+hard-coded in [versions.tf](versions.tf). **Set it and `state_bucket_name` below
+to the same globally unique value before deploying**, or step 2 will fail to
+initialise.
+
 ```bash
-# 1. One-time state backend. Name must match the backend block in versions.tf.
+# 1. One-time state backend
 cd bootstrap
 cat > terraform.tfvars <<'EOF'
 aws_region        = "eu-west-1"
@@ -124,15 +129,24 @@ EOF
 terraform init && terraform apply
 cd ..
 
-# 2. Deploy
+# 2. Deploy the lakehouse
 cp terraform.tfvars.example terraform.tfvars
 terraform init && terraform apply
 
-# 3. Run
-aws stepfunctions start-execution \
+# 3. Run the pipeline
+ARN=$(aws stepfunctions start-execution \
   --state-machine-arn $(terraform output -raw state_machine_arn) \
-  --input file://examples/start-execution.json
+  --input file://examples/start-execution.json \
+  --query executionArn --output text)
+
+# 4. Follow it to completion
+aws stepfunctions describe-execution --execution-arn $ARN \
+  --query '{status:status, stopDate:stopDate}'
 ```
+
+A first run takes several minutes, most of it Glue cluster start-up. `status`
+moves from `RUNNING` to `SUCCEEDED`; anything else means a stage failed and the
+Step Functions execution history names which.
 
 ---
 
@@ -148,9 +162,17 @@ worth knowing:
 | `crawler_enabled` / `athena_validation_enabled` | `true` | Toggle the optional stages |
 | `bucket_name` | *generated* | Defaults to `<project>-<account>-<region>` |
 
+Disabling a stage removes it from the state machine rather than skipping it, so
+the deployed definition always reflects what actually runs. `terraform.tfvars` is
+gitignored, keeping account-specific values out of version control.
+
 ---
 
 ## Querying
+
+Run against the `ecommerce-lakehouse-athena` workgroup, which enforces its own
+results location — queries issued from the default `primary` workgroup will write
+results elsewhere.
 
 ```sql
 -- Daily revenue, partition-pruned on order_date
@@ -173,20 +195,35 @@ pytest -q
 ```
 
 Transformation logic is separated from Glue argument resolution, so it is
-testable without a live Glue context. Spark tests skip when PySpark or a JVM is
-absent. CI runs the tests, then `terraform fmt -check` and `validate`.
+testable without a live Glue context. The suite covers type coercion, the
+valid/invalid split for every business rule, and the gate's freshness logic
+against mocked S3 and Glue clients. Spark tests skip when PySpark or a JVM is
+absent, so the suite stays runnable locally and executes in full in CI.
+
+CI runs the tests first — a logic regression fails fast — then
+`terraform fmt -check`, `init -backend=false`, and `validate`.
 
 ---
 
 ## Teardown
 
+Run from the repo root; `bootstrap/` is a separate configuration and is left
+untouched.
+
 ```bash
 terraform destroy
 ```
 
-The state bucket carries `prevent_destroy` and survives by design — it must
-outlive the environments whose state it holds. That guard binds Terraform only,
-not the S3 API.
+Two constraints, both encoded in the configuration:
+
+- **Athena workgroups need recursive deletion.** Query-execution history makes a
+  workgroup non-empty and AWS refuses to delete it, so `force_destroy = true` is
+  set on the resource.
+- **The state bucket survives by design.** It carries `prevent_destroy` because it
+  must outlive the environments whose state it holds. That guard binds Terraform
+  only, not the S3 API — and since the bucket has versioning without
+  `force_destroy`, every object version must be removed before it can be deleted
+  at all.
 
 ---
 

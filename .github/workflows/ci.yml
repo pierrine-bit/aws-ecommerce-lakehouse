@@ -5,6 +5,18 @@ on:
     branches: ["main"]
   pull_request:
     branches: ["main"]
+  # Deploys are manual: a bad merge should never reach AWS before someone has
+  # read the plan.
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Terraform action to run after validation"
+        required: true
+        type: choice
+        default: plan
+        options:
+          - plan
+          - apply
 
 jobs:
   validate:
@@ -45,3 +57,52 @@ jobs:
 
       - name: Terraform validate
         run: terraform validate
+
+  terraform:
+    # Only on a manual run, and only once validation has passed.
+    if: github.event_name == 'workflow_dispatch'
+    needs: validate
+    runs-on: ubuntu-latest
+
+    # Holds AWS_ROLE_ARN and ALERT_EMAIL. Add required reviewers here to make
+    # an apply wait for approval.
+    environment: production
+
+    permissions:
+      contents: read
+
+    # Terraform 1.10 native S3 locking fails a concurrent run rather than
+    # corrupting state, but queueing is friendlier than a lock error.
+    concurrency:
+      group: lakehouse-terraform
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: eu-west-1
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.14.9
+
+      - name: Terraform init
+        run: terraform init -input=false
+
+      - name: Terraform plan
+        env:
+          TF_VAR_alert_email: ${{ secrets.ALERT_EMAIL }}
+        run: terraform plan -input=false -out=tfplan
+
+      - name: Terraform apply
+        if: github.event.inputs.action == 'apply'
+        env:
+          TF_VAR_alert_email: ${{ secrets.ALERT_EMAIL }}
+        run: terraform apply -input=false -auto-approve tfplan

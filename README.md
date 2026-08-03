@@ -7,10 +7,7 @@
 A batch lakehouse for e-commerce transaction data, deployed end to end with
 Terraform. Raw product, order, and order-item files are schema-validated,
 deduplicated, and merged into ACID Delta Lake tables on S3, registered in the
-Glue Data Catalog for querying through Athena, then archived once the curated
-layer is verified.
-
----
+Glue Data Catalog for querying through Athena.
 
 ## Architecture
 
@@ -19,7 +16,6 @@ flowchart TD
     SRC["Raw files<br/>CSV / XLSX"] -->|uploaded by Terraform| RAW[("S3 · raw/")]
 
     subgraph SFN["Step Functions state machine"]
-        direction TB
         ETL["1 · Glue Spark ETL"]
         GATE["2 · Quality gate"]
         CRAWL["3 · Delta crawler"]
@@ -36,7 +32,7 @@ flowchart TD
     CAT --> ATHENA["Athena"]
     ARCHIVE --> ARC[("S3 · archived/")]
 
-    SFN -.->|failure · timeout · abort| EB["EventBridge"]
+    SFN -.->|"failure, timeout, or abort"| EB["EventBridge"]
     EB --> SNS["SNS → email"]
 ```
 
@@ -46,10 +42,8 @@ Stages run sequentially, each gated on the one before it.
   rather than duplicating rows.
 - **Fail-closed** — raw files are archived only after the curated tables are
   proven catalogued, fresh, and non-empty.
-- **Auditable** — rejected rows are quarantined in `rejected/` with a reason, not
-  filtered away.
-
----
+- **Auditable** — invalid rows are quarantined with a rejection reason and
+  timestamp, never silently dropped.
 
 ## Data model
 
@@ -74,22 +68,18 @@ erDiagram
     }
 ```
 
-Order items are validated against both parents; rows whose `product_id` or
-`order_id` does not resolve are quarantined rather than loaded, which is why the
-ETL processes products and orders first.
-
-Schemas are declared explicitly rather than inferred, so upstream drift fails at
-read time instead of propagating downstream. Partitions follow the dominant query
-patterns, so Athena prunes rather than scans.
-
----
+- Order items are validated against both parents — hence products and orders are
+  processed first.
+- Schemas are declared, not inferred, so upstream drift fails at read time.
+- Partitions match the dominant query patterns, so Athena prunes rather than scans.
 
 ## Pipeline
 
-**ETL** — Glue 4.0 Spark on two `G.1X` workers. Reads each dataset against a
-fixed schema, normalises types so unparseable numerics become SQL `NULL` rather
-than `NaN`, splits valid from invalid rows, resolves referential integrity,
-deduplicates on the merge key, then merges into Delta and registers the table.
+**ETL** — Glue 4.0 Spark, two `G.1X` workers.
+
+- Coerces types so unparseable numerics become SQL `NULL`, not `NaN`
+- Splits valid from invalid rows, then checks referential integrity
+- Deduplicates on the merge key, merges into Delta, registers the table
 
 | Dataset | Rejected when |
 | ------- | ------------- |
@@ -97,44 +87,34 @@ deduplicates on the merge key, then merges into Delta and registers the table.
 | `orders` | `order_id` or `user_id` null · `order_timestamp` unparseable · `total_amount` null or negative |
 | `order_items` | any key null · `order_timestamp` unparseable · `days_since_prior_order` negative · `product_id` or `order_id` unresolved |
 
-A null `days_since_prior_order` is valid — it marks a customer's first order — so
-only negative values are rejected.
+`days_since_prior_order` may be null — a customer's first order — so only negative
+values reject.
 
-**Quality gate** — a 1-DPU Glue Python shell job asserting each table has a Delta
-transaction log, a Catalog entry, and a commit no older than
-`max_data_age_hours`. Freshness is the load-bearing check: presence alone would
-pass on a log left by an earlier run, even if today's wrote nothing.
+**Quality gate** — 1-DPU Glue Python shell job. Every table must have a Delta
+transaction log, a Catalog entry, and a commit newer than `max_data_age_hours`.
+Freshness is the load-bearing check: presence alone passes on a log left by an
+earlier run.
 
-**Orchestration** (Step Functions) retries Glue and Lambda tasks with backoff,
-tolerates an already-running crawler, and routes every other error to a terminal
-failure state that raises an alert.
+**Orchestration** — retries Glue and Lambda with backoff, tolerates an
+already-running crawler, routes all other errors to a terminal failure state.
 
-**Alerting** — two EventBridge rules publish to an SNS topic: one for the state
-machine entering `FAILED`, `TIMED_OUT`, or `ABORTED`, and one for either Glue job
-failing or timing out, whether the pipeline invoked it or someone ran it by hand.
-The second rule matters because a manually triggered job failure would otherwise
-be silent.
+**Alerting** — two EventBridge rules publish to SNS:
 
-**Observability** — Glue and Step Functions each write to a dedicated CloudWatch
-log group with 14-day retention, and the state machine logs at `ALL` with
-execution data included. The ETL logs read, rejected, and written row counts per
-dataset, so a run's lineage is reconstructable from the logs alone.
+- pipeline enters `FAILED`, `TIMED_OUT`, or `ABORTED`
+- either Glue job hits `FAILED` or `TIMEOUT`, manual runs included
 
----
+**Observability** — 14-day CloudWatch log groups for Glue and Step Functions,
+which logs at `ALL` with execution data. The ETL logs read, rejected, and written
+counts per dataset, so a run's lineage is reconstructable from logs alone.
 
 ## Security
 
-Three narrowly scoped IAM roles — Glue, Lambda, and Step Functions — rather than
-one shared role, each limited to the S3 prefixes, Catalog resources, and job ARNs
-it needs. The archival Lambda can read and delete only under `raw/` and write only
-under `archived/`, so it has no access to curated data at all. Athena executes as
-the Step Functions role, which is what carries the Catalog read and results-write
-permissions.
-
-The lakehouse bucket enforces SSE-S3 encryption, versioning, and a full
-public-access block. Terraform state is likewise encrypted, versioned, and locked.
-
----
+- Three scoped IAM roles — Glue, Lambda, Step Functions — not one shared role,
+  each limited to the prefixes, Catalog resources, and job ARNs it needs
+- The archival Lambda reads and deletes only under `raw/` and writes only under
+  `archived/`, so it has no access to curated data
+- SSE-S3 encryption, versioning, and a full public-access block on the bucket
+- Terraform state encrypted, versioned, and locked
 
 ## Deployment
 
@@ -166,19 +146,15 @@ ARN=$(aws stepfunctions start-execution \
   --query executionArn --output text)
 
 # 4. Follow it to completion
-aws stepfunctions describe-execution --execution-arn $ARN \
-  --query '{status:status, stopDate:stopDate}'
+aws stepfunctions describe-execution --execution-arn $ARN --query status
 ```
 
 A first run takes several minutes, most of it Glue cluster start-up. `status`
 moves from `RUNNING` to `SUCCEEDED`; anything else means a stage failed and the
-Step Functions execution history names which.
+execution history names which.
 
-Re-running is safe — the merge is idempotent. Note that a successful run archives
-the raw zone, so re-processing the same batch means restoring the files from
-`archived/<timestamp>/` or re-uploading them first.
-
----
+Re-running is safe, but a successful run archives the raw zone — re-processing the
+same batch means restoring the files from `archived/<timestamp>/` first.
 
 ## Configuration
 
@@ -190,22 +166,18 @@ worth knowing:
 | `alert_email` | `""` | Failure alerts; **none are sent while unset** |
 | `max_data_age_hours` | `24` | Age at which the gate treats a table as stale |
 | `crawler_enabled` / `athena_validation_enabled` | `true` | Toggle the optional stages |
-| `bucket_name` | *generated* | Defaults to `<project>-<account>-<region>` |
 
-Disabling a stage removes it from the state machine rather than skipping it, so
-the deployed definition always reflects what actually runs. `terraform.tfvars` is
-gitignored, keeping account-specific values out of version control.
-
----
+Disabling a stage removes it from the state machine rather than skipping it.
+`terraform.tfvars` is gitignored, keeping account-specific values out of version
+control.
 
 ## Querying
 
 Run against the `ecommerce-lakehouse-athena` workgroup, which enforces its own
-results location — queries issued from the default `primary` workgroup will write
-results elsewhere.
+results location — queries from the default `primary` workgroup write results
+elsewhere.
 
 ```sql
--- Daily revenue, partition-pruned on order_date
 SELECT order_date,
        SUM(total_amount) AS revenue,
        COUNT(DISTINCT order_id) AS orders
@@ -215,8 +187,6 @@ GROUP BY order_date
 ORDER BY order_date;
 ```
 
----
-
 ## Testing
 
 ```bash
@@ -224,21 +194,17 @@ pip install -r requirements-dev.txt
 pytest -q
 ```
 
-Transformation logic is separated from Glue argument resolution, so it is
-testable without a live Glue context. The suite covers type coercion, the
-valid/invalid split for every business rule, and the gate's freshness logic
-against mocked S3 and Glue clients. Spark tests skip when PySpark or a JVM is
-absent, so the suite stays runnable locally and executes in full in CI.
-
-CI runs the tests first — a logic regression fails fast — then
-`terraform fmt -check`, `init -backend=false`, and `validate`.
-
----
+- Transformation logic is separated from Glue argument resolution, so it runs
+  without a live Glue context
+- Covers type coercion, every business rule's valid/invalid split, and the gate's
+  freshness logic against mocked S3 and Glue clients
+- Spark tests skip without PySpark or a JVM; CI installs both and runs them in full
+- CI order: tests first, so a logic regression fails fast, then
+  `terraform fmt -check`, `init -backend=false`, and `validate`
 
 ## Teardown
 
-Run from the repo root; `bootstrap/` is a separate configuration and is left
-untouched.
+Run from the repo root; `bootstrap/` is separate and left untouched.
 
 ```bash
 terraform destroy
@@ -247,22 +213,18 @@ terraform destroy
 Two constraints, both encoded in the configuration:
 
 - **Athena workgroups need recursive deletion.** Query-execution history makes a
-  workgroup non-empty and AWS refuses to delete it, so `force_destroy = true` is
-  set on the resource.
-- **The state bucket survives by design.** It carries `prevent_destroy` because it
-  must outlive the environments whose state it holds. That guard binds Terraform
-  only, not the S3 API — and since the bucket has versioning without
-  `force_destroy`, every object version must be removed before it can be deleted
-  at all.
-
----
+  workgroup non-empty, so `force_destroy = true` is set on the resource.
+- **The state bucket survives by design.** `prevent_destroy` keeps it outliving
+  the environments whose state it holds. That guard binds Terraform only, not the
+  S3 API, and with versioning enabled every object version must be removed before
+  the bucket can be deleted.
 
 ## Known limitations
 
-Ingestion is batch and manually triggered; an S3 notification or schedule would
-make it event-driven. XLSX parsing happens on the Spark driver, so it does not
-scale beyond driver memory — converting sources to CSV or Parquet upstream would
-remove the ceiling. The state bucket name is hard-coded, as Terraform forbids
-variables in `backend` blocks. The quality gate validates presence and freshness
-but not distributions; column profiling would deepen it. Delta `OPTIMIZE` and
-`VACUUM` are unscheduled, so small files accumulate across many incremental runs.
+- Ingestion is batch and manually triggered; an S3 notification or schedule would
+  make it event-driven.
+- XLSX parsing happens on the Spark driver, so it does not scale beyond driver
+  memory.
+- The quality gate validates presence and freshness, not distributions.
+- Delta `OPTIMIZE` and `VACUUM` are unscheduled, so small files accumulate across
+  many incremental runs.

@@ -176,6 +176,26 @@ The Athena workgroup needs `force_destroy` — query history makes it non-empty.
 state bucket keeps `prevent_destroy` and is removed deliberately, not by
 `destroy`.
 
+## Repository layout
+
+```text
+bootstrap/           one-time S3 backend for Terraform state
+data/                source datasets
+examples/            sample state machine input
+glue_scripts/        Spark ETL and quality-gate jobs
+lambda/              archival handler
+tests/               unit tests for both job modules
+alerts.tf            SNS topic and EventBridge failure rules
+glue.tf              Glue jobs, Catalog database, crawler, Athena workgroup
+iam.tf               least-privilege roles and policies
+lambda.tf            archival function
+main.tf              S3 bucket, hardening, lifecycle rules, data uploads
+outputs.tf           bucket, database, workgroup, state machine ARN
+step_functions.tf    state machine definition
+variables.tf         input variables
+versions.tf          provider constraints and S3 backend
+```
+
 ## Known limitations
 
 - Batch ingestion, manually triggered

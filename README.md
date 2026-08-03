@@ -4,8 +4,7 @@ An AWS lakehouse for processing e-commerce transaction data. Raw product, order,
 and order-item datasets are stored in Amazon S3, validated and deduplicated by AWS
 Glue Spark jobs, and written as Delta Lake tables for analytics through the AWS
 Glue Data Catalog and Amazon Athena. AWS Step Functions orchestrates the ETL
-workflow, while Terraform provisions the infrastructure and GitHub Actions runs
-automated tests and Terraform validation on every push.
+workflow, while Terraform provisions the infrastructure and GitHub Actions runs automated tests and Terraform validation on every push.
 
 ## Architecture
 
@@ -23,8 +22,8 @@ automated tests and Terraform validation on every push.
 │ 5. Archive Files      │
 └───────────────────────┘
       │           │
-      │           ├──────► S3 Rejected   (invalid rows)
-      │           └──────► S3 Archived   (consumed raw files)
+      │           ├──────► S3 Rejected  
+      │           └──────► S3 Archived 
       ▼
   Delta Lake
       │
@@ -102,10 +101,7 @@ aws-ecommerce-lakehouse/
 └──────────────────────────────────────────┘
 ```
 
-Only merge keys, partition keys and foreign keys are shown; each table carries
-further attribute columns.
-
-Sources are `products.csv`, `orders_apr_2025.xlsx` and
+The sources are `products.csv`, `orders_apr_2025.xlsx` and
 `order_items_apr_2025.xlsx`. Each order item points at both an order and a product,
 so products and orders load first and referential integrity is checked during
 validation. An item whose parents can't be resolved is rejected rather than written.

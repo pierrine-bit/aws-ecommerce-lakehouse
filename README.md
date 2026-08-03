@@ -67,6 +67,15 @@ erDiagram
 Order items are validated against both parents, so products and orders are
 processed first. Schemas are declared, not inferred.
 
+```text
+raw/                 landing zone
+lakehouse-dwh/       curated Delta tables
+rejected/            quarantined rows, with reason
+archived/            consumed raw files, timestamped
+scripts/             job code
+athena-results/      query output
+```
+
 ## Pipeline
 
 **ETL** — Glue Spark. Coerces types, splits valid from invalid rows, checks

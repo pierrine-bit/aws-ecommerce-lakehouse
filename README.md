@@ -181,37 +181,38 @@ state bucket keeps `prevent_destroy` and is removed deliberately, not by
 Infrastructure, in the order the pipeline runs:
 
 ```text
-├── main.tf                 S3 bucket, hardening, lifecycle rules, data uploads
-├── glue.tf                 Glue jobs, Catalog database, crawler, Athena workgroup
-├── step_functions.tf       state machine definition
-├── lambda.tf               archival function
-├── alerts.tf               SNS topic and EventBridge failure rules
-└── iam.tf                  roles and policies for Glue, Lambda, Step Functions
+├── main.tf
+├── glue.tf
+├── step_functions.tf
+├── lambda.tf
+├── alerts.tf
+└── iam.tf
 ```
 
 Terraform configuration:
 
 ```text
-├── variables.tf            input variables
-├── outputs.tf              bucket, database, workgroup, state machine ARN
-├── providers.tf            AWS provider region
-├── versions.tf             provider constraints and S3 backend
+├── variables.tf
+├── outputs.tf
+├── providers.tf
+├── versions.tf
 ├── terraform.tfvars.example
-└── bootstrap/              one-time backend holding Terraform state
+└── bootstrap/
 ```
 
 Job code, data, and verification:
 
 ```text
 ├── glue_scripts/
-│   ├── lakehouse_delta_etl.py    Spark ETL and Delta merge
-│   └── quality_checks.py         post-ETL quality gate
-├── lambda/archive_files.py       raw-zone archival handler
-├── data/                         source datasets
-├── examples/                     sample state machine input
-├── tests/                        unit tests for both job modules
-├── requirements-dev.txt          test dependencies
-└── .github/workflows/ci.yml      CI: tests, format check, validate
+│   ├── lakehouse_delta_etl.py
+│   └── quality_checks.py
+├── lambda/
+│   └── archive_files.py
+├── data/
+├── examples/
+├── tests/
+├── requirements-dev.txt
+└── .github/workflows/ci.yml
 ```
 
 ## Known limitations

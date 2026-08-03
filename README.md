@@ -30,8 +30,8 @@ flowchart TD
 ```
 
 Each stage depends on the one before it. If something fails the workflow stops and
-raises an SNS alert. The merge keys on business IDs, so re-running a batch doesn't
-add duplicates.
+raises an SNS alert. The merge is keyed on business IDs, so re-running a batch
+doesn't add duplicates.
 
 ## Project structure
 
@@ -86,12 +86,14 @@ erDiagram
 ```
 
 Sources are `products.csv`, `orders_apr_2025.xlsx` and
-`order_items_apr_2025.xlsx`. Order Items reference the other two tables, so
-Products and Orders go first and referential integrity gets checked during
-validation. Schema inference is off. Each dataset uses an explicit Spark schema, so
-an unexpected column or a changed type fails the read rather than reaching the
-curated layer. Partitions follow the queries people actually run, which keeps
-Athena scans down.
+`order_items_apr_2025.xlsx`. Each order item points at both an order and a product,
+so products and orders load first and referential integrity is checked during
+validation. An item whose parents can't be resolved is rejected rather than written.
+
+Schema inference is off. Each dataset uses an explicit Spark schema, so an
+unexpected column or a changed type fails the read rather than reaching the curated
+layer. Partitions follow the queries people actually run, which keeps Athena scans
+down.
 
 Delta rather than plain Parquet, because monthly batches can legitimately resend an
 order. Merging on the business key means a replayed batch converges on the same

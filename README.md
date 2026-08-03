@@ -85,15 +85,24 @@ patterns, so Athena prunes rather than scans.
 
 ## Pipeline
 
-**ETL** (Glue Spark) reads each dataset against a fixed schema, normalises types,
-splits valid from invalid rows on null keys and business rules, resolves
-referential integrity, deduplicates, then merges into Delta and registers the
-table.
+**ETL** — Glue 4.0 Spark on two `G.1X` workers. Reads each dataset against a
+fixed schema, normalises types so unparseable numerics become SQL `NULL` rather
+than `NaN`, splits valid from invalid rows, resolves referential integrity,
+deduplicates on the merge key, then merges into Delta and registers the table.
 
-**Quality gate** (Glue Python shell) asserts each table has a Delta transaction
-log, a Catalog entry, and a commit no older than `max_data_age_hours`. Freshness
-is the load-bearing check — presence alone would pass on a log left by an earlier
-run.
+| Dataset | Rejected when |
+| ------- | ------------- |
+| `products` | `product_id` is null |
+| `orders` | `order_id` or `user_id` null · `order_timestamp` unparseable · `total_amount` null or negative |
+| `order_items` | any key null · `order_timestamp` unparseable · `days_since_prior_order` negative · `product_id` or `order_id` unresolved |
+
+A null `days_since_prior_order` is valid — it marks a customer's first order — so
+only negative values are rejected.
+
+**Quality gate** — a 1-DPU Glue Python shell job asserting each table has a Delta
+transaction log, a Catalog entry, and a commit no older than
+`max_data_age_hours`. Freshness is the load-bearing check: presence alone would
+pass on a log left by an earlier run, even if today's wrote nothing.
 
 **Orchestration** (Step Functions) retries Glue and Lambda tasks with backoff,
 tolerates an already-running crawler, and routes every other error to a terminal

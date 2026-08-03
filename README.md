@@ -52,11 +52,30 @@ Stages run sequentially, each gated on the one before it.
 
 ## Data model
 
-| Table | Merge key | Partitioned by | Referential integrity |
-| ----- | --------- | -------------- | --------------------- |
-| `products` | `product_id` | `department` | — |
-| `orders` | `order_id` | `order_date` | — |
-| `order_items` | `id` | `order_date` | `product_id` → `products`, `order_id` → `orders` |
+```mermaid
+erDiagram
+    PRODUCTS ||--o{ ORDER_ITEMS : supplies
+    ORDERS   ||--o{ ORDER_ITEMS : contains
+
+    PRODUCTS {
+        bigint product_id PK "merge key"
+        string department "partition"
+    }
+    ORDERS {
+        bigint order_id PK "merge key"
+        date order_date "partition"
+    }
+    ORDER_ITEMS {
+        bigint id PK "merge key"
+        bigint order_id FK
+        bigint product_id FK
+        date order_date "partition"
+    }
+```
+
+Order items are validated against both parents; rows whose `product_id` or
+`order_id` does not resolve are quarantined rather than loaded, which is why the
+ETL processes products and orders first.
 
 Schemas are declared explicitly rather than inferred, so upstream drift fails at
 read time instead of propagating downstream. Partitions follow the dominant query

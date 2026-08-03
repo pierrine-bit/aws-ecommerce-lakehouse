@@ -31,7 +31,8 @@ flowchart TD
     RAW --> ETL
     ETL --> DWH[("S3 · lakehouse-dwh/<br/>Delta tables")]
     ETL -.->|invalid rows| REJ[("S3 · rejected/")]
-    CRAWL --> CAT[("Glue Data Catalog")]
+    ETL -->|registers tables| CAT[("Glue Data Catalog")]
+    CRAWL -->|syncs schema| CAT
     CAT --> ATHENA["Athena"]
     ARCHIVE --> ARC[("S3 · archived/")]
 
@@ -224,7 +225,3 @@ Two constraints, both encoded in the configuration:
   only, not the S3 API — and since the bucket has versioning without
   `force_destroy`, every object version must be removed before it can be deleted
   at all.
-
----
-
-Licensed under the [MIT License](LICENSE).

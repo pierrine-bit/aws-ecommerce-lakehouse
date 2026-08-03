@@ -26,7 +26,7 @@ flowchart TD
     ETL -.->|invalid rows| REJ[("S3 · rejected/")]
     DWH --> CAT[("Glue Catalog · Athena")]
     ARCHIVE --> ARC[("S3 · archived/")]
-    SFN -.->|failure| ALERT["EventBridge · SNS"]
+    SFN -.......->|failure| ALERT["EventBridge · SNS"]
 ```
 
 Each stage depends on the one before it. If something fails the workflow stops and

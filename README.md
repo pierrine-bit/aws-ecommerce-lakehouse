@@ -1,21 +1,19 @@
 # E-Commerce Lakehouse on AWS
 
-[![CI](https://github.com/pierrine-bit/aws-ecommerce-lakehouse/actions/workflows/ci.yml/badge.svg)](https://github.com/pierrine-bit/aws-ecommerce-lakehouse/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Terraform](https://img.shields.io/badge/Terraform-%E2%89%A5%201.10-7B42BC)](versions.tf)
-
-A batch lakehouse for e-commerce transaction data, deployed end to end with
-Terraform. Raw product, order, and order-item files are validated, deduplicated,
-and merged into ACID Delta Lake tables on S3, catalogued for querying through
-Athena.
+An AWS lakehouse for processing e-commerce transaction data. Raw product, order,
+and order-item datasets are stored in Amazon S3, validated and deduplicated by AWS
+Glue Spark jobs, and written as Delta Lake tables for analytics through the AWS
+Glue Data Catalog and Amazon Athena. AWS Step Functions orchestrates the ETL
+workflow, while Terraform provisions the infrastructure and GitHub Actions runs
+automated tests and Terraform validation on every push.
 
 ## Architecture
 
 ```mermaid
 flowchart TD
-    SRC["Raw files<br/>CSV / XLSX"] -->|uploaded by Terraform| RAW[("S3 · raw/")]
+    RAW[("S3 · raw/")] --> ETL
 
-    subgraph SFN["Step Functions state machine"]
+    subgraph SFN["Step Functions"]
         ETL["1 · Glue Spark ETL"]
         GATE["2 · Quality gate"]
         CRAWL["3 · Delta crawler"]
@@ -24,159 +22,18 @@ flowchart TD
         ETL --> GATE --> CRAWL --> CHECK --> ARCHIVE
     end
 
-    RAW --> ETL
-    ETL --> DWH[("S3 · lakehouse-dwh/<br/>Delta tables")]
+    ETL --> DWH[("S3 · lakehouse-dwh/")]
     ETL -.->|invalid rows| REJ[("S3 · rejected/")]
-    ETL -->|registers tables| CAT[("Glue Data Catalog")]
-    CRAWL -->|syncs schema| CAT
-    CAT --> ATHENA["Athena"]
+    DWH --> CAT[("Glue Catalog · Athena")]
     ARCHIVE --> ARC[("S3 · archived/")]
-
-    SFN -.->|"failure, timeout, or abort"| EB["EventBridge"]
-    EB --> SNS["SNS → email"]
+    SFN -.->|failure| ALERT["EventBridge · SNS"]
 ```
 
-- **Idempotent** — `MERGE` on business keys, so replaying a batch converges.
-- **Fail-closed** — raw files archive only after the tables are proven catalogued,
-  fresh, and non-empty.
-- **Auditable** — invalid rows are quarantined with a reason, never dropped.
+Each stage depends on the one before it. If something fails the workflow stops and
+raises an SNS alert. The merge keys on business IDs, so re-running a batch doesn't
+add duplicates.
 
-## Data model
-
-```mermaid
-erDiagram
-    PRODUCTS ||--o{ ORDER_ITEMS : supplies
-    ORDERS   ||--o{ ORDER_ITEMS : contains
-
-    PRODUCTS {
-        bigint product_id PK "merge key"
-        string department "partition"
-    }
-    ORDERS {
-        bigint order_id PK "merge key"
-        date order_date "partition"
-    }
-    ORDER_ITEMS {
-        bigint id PK "merge key"
-        bigint order_id FK
-        bigint product_id FK
-        date order_date "partition"
-    }
-```
-
-Order items are validated against both parents, so products and orders are
-processed first. Schemas are declared, not inferred.
-
-```text
-raw/                 landing zone
-lakehouse-dwh/       curated Delta tables
-rejected/            quarantined rows, with reason
-archived/            consumed raw files, timestamped
-scripts/             job code
-athena-results/      query output
-```
-
-## Pipeline
-
-**ETL** — Glue Spark. Coerces types, splits valid from invalid rows, checks
-referential integrity, deduplicates on the merge key, merges into Delta.
-
-| Dataset | Rejected when |
-| ------- | ------------- |
-| `products` | `product_id` is null |
-| `orders` | `order_id` or `user_id` null · `order_timestamp` unparseable · `total_amount` null or negative |
-| `order_items` | any key null · `order_timestamp` unparseable · `days_since_prior_order` negative · `product_id` or `order_id` unresolved |
-
-**Quality gate** — every table must have a Delta transaction log, a Catalog entry,
-and a commit newer than `max_data_age_hours`. Freshness is the load-bearing check:
-presence alone passes on a log left by an earlier run.
-
-**Failure handling** — Glue and Lambda retry with backoff; anything else routes to
-a terminal failure state. EventBridge publishes pipeline and Glue job failures to
-SNS. The ETL logs read, rejected, and written counts per dataset.
-
-## Security
-
-- Three scoped IAM roles; the archival Lambda has no access to curated data
-- SSE-S3 encryption, versioning, and a public-access block; state encrypted and
-  locked
-
-## Deployment
-
-Requires Terraform ≥ 1.10 and AWS CLI v2. The state bucket name is hard-coded in
-[versions.tf](versions.tf) — set it and `state_bucket_name` to the same globally
-unique value first, or step 2 fails to initialise.
-
-```bash
-# 1. One-time state backend
-cd bootstrap
-cat > terraform.tfvars <<'EOF'
-aws_region        = "eu-west-1"
-state_bucket_name = "ecommerce-lakehouse-tfstate-<your-account-id>"
-EOF
-terraform init && terraform apply
-cd ..
-
-# 2. Deploy
-cp terraform.tfvars.example terraform.tfvars
-terraform init && terraform apply
-
-# 3. Run
-ARN=$(aws stepfunctions start-execution \
-  --state-machine-arn $(terraform output -raw state_machine_arn) \
-  --input file://examples/start-execution.json \
-  --query executionArn --output text)
-
-aws stepfunctions describe-execution --execution-arn $ARN --query status
-```
-
-Re-running is safe, but archival empties the raw zone — restore from
-`archived/<timestamp>/` to reprocess a batch.
-
-## Configuration
-
-Defaults work unmodified; see [variables.tf](variables.tf).
-
-| Variable | Default | Purpose |
-| -------- | ------- | ------- |
-| `alert_email` | `""` | Failure alerts; **none are sent while unset** |
-| `max_data_age_hours` | `24` | Age at which the gate treats a table as stale |
-| `crawler_enabled` / `athena_validation_enabled` | `true` | Toggle the optional stages |
-
-## Querying
-
-Use the `ecommerce-lakehouse-athena` workgroup, which enforces its own results
-location.
-
-```sql
-SELECT order_date, SUM(total_amount) AS revenue
-FROM ecommerce_lakehouse.orders
-GROUP BY order_date
-ORDER BY order_date;
-```
-
-## Testing
-
-```bash
-pip install -r requirements-dev.txt
-pytest -q
-```
-
-Job logic is separated from Glue argument resolution, so it tests without a live
-Glue context. Spark tests skip without a JVM. CI runs the tests, then
-`terraform fmt -check` and `validate`.
-
-## Teardown
-
-```bash
-terraform destroy
-```
-
-The Athena workgroup needs `force_destroy` — query history makes it non-empty. The
-state bucket keeps `prevent_destroy` and is removed deliberately, not by
-`destroy`.
-
-## Repository layout
+## Project structure
 
 ```text
 aws-ecommerce-lakehouse/
@@ -205,9 +62,176 @@ aws-ecommerce-lakehouse/
     └── ci.yml
 ```
 
-## Known limitations
+## Data model
 
-- Batch ingestion, manually triggered
-- XLSX parsed on the Spark driver, so bounded by driver memory
-- The gate checks presence and freshness, not distributions
-- Delta `OPTIMIZE` and `VACUUM` are unscheduled
+```mermaid
+erDiagram
+    PRODUCTS ||--o{ ORDER_ITEMS : supplies
+    ORDERS   ||--o{ ORDER_ITEMS : contains
+
+    PRODUCTS {
+        bigint product_id PK "merge key"
+        string department "partition"
+    }
+    ORDERS {
+        bigint order_id PK "merge key"
+        date order_date "partition"
+    }
+    ORDER_ITEMS {
+        bigint id PK "merge key"
+        bigint order_id FK
+        bigint product_id FK
+        date order_date "partition"
+    }
+```
+
+Sources are `products.csv`, `orders_apr_2025.xlsx` and
+`order_items_apr_2025.xlsx`. Order Items reference the other two tables, so
+Products and Orders go first and referential integrity gets checked during
+validation. Schema inference is off. Each dataset uses an explicit Spark schema, so
+an unexpected column or a changed type fails the read rather than reaching the
+curated layer. Partitions follow the queries people actually run, which keeps
+Athena scans down.
+
+Delta rather than plain Parquet, because monthly batches can legitimately resend an
+order. Merging on the business key means a replayed batch converges on the same
+tables instead of duplicating rows. With Parquet you'd need full rewrites or a
+separate dedup step to get the same result.
+
+## Pipeline
+
+### ETL
+
+Glue Spark reads each dataset against its schema, validates types and mandatory
+fields, separates valid rows from rejected ones, deduplicates on the merge key,
+then merges into Delta. CSV goes straight into Spark. The Excel workbooks have to
+go through pandas first, since Spark can't read them natively.
+
+| Dataset | Rejected when |
+| ------- | ------------- |
+| `products` | `product_id` is null |
+| `orders` | `order_id` or `user_id` null · `order_timestamp` unparseable · `total_amount` null or negative |
+| `order_items` | any key null · `order_timestamp` unparseable · `days_since_prior_order` negative · `product_id` or `order_id` unresolved |
+
+### Quality gate
+
+This one runs as a 1-DPU Python shell job rather than Spark, because it only reads
+S3 and Catalog metadata and a cluster would sit idle. It checks that Delta
+transaction logs exist, that Catalog tables are available, and that the latest
+commit is inside the freshness threshold.
+
+Freshness is the check that does the real work. Without it, a transaction log left
+behind by an earlier run would satisfy a presence check even if today's run wrote
+nothing at all. When the gate fails the workflow stops and the raw files stay where
+they are.
+
+### Catalog and archival
+
+A Glue Crawler refreshes the Catalog, then an Athena query confirms each table has
+rows. Only after that does a Lambda move the processed files into a timestamped
+folder under `archived/`.
+
+The row check is `SELECT 1 / COUNT(*)`. An empty table divides by zero, so
+emptiness surfaces through the same retry handling as any other query error and
+doesn't need a stage of its own to fetch and inspect results.
+
+Archiving last is deliberate. Since the raw zone is only cleared once the curated
+tables are proven usable, a failed run leaves the source data untouched and can
+just be retried.
+
+## Security
+
+Glue, Lambda and Step Functions each get their own IAM role, holding only what they
+need. The archival Lambda can move files from `raw/` to `archived/` but has no
+access to the curated data in `lakehouse-dwh/`.
+
+On the bucket: SSE-S3 encryption, versioning, and public access blocked on every
+setting. Terraform state sits in a remote backend with locking, so two applies
+can't collide.
+
+## Testing
+
+```bash
+pip install -r requirements-dev.txt
+pytest -q
+```
+
+The ETL logic is kept separate from Glue job initialization, which is what makes it
+testable without a live Glue context. Spark-dependent tests skip themselves when
+there's no local Spark.
+
+## Configuration
+
+Every Terraform variable has a working default, so the stack deploys as-is.
+`terraform.tfvars.example` lists them all. Worth knowing: `alert_email` starts
+empty, so the SNS topic and rules get created but nothing actually reaches you
+until you set an address and confirm the subscription.
+
+## Deployment
+
+Requires AWS CLI v2, Terraform, and Python 3.x for the tests.
+
+### 1. Create the remote backend
+
+Terraform won't take a variable inside a `backend` block, so the state bucket name
+is written directly into `versions.tf`. Set that and `state_bucket_name` below to
+the same globally unique name, or step 2 can't initialise. Run once per account.
+
+```bash
+cd bootstrap
+cat > terraform.tfvars <<'EOF'
+aws_region        = "eu-west-1"
+state_bucket_name = "ecommerce-lakehouse-tfstate-<your-account-id>"
+EOF
+terraform init && terraform apply
+cd ..
+```
+
+### 2. Deploy the infrastructure
+
+```bash
+cp terraform.tfvars.example terraform.tfvars
+terraform init
+terraform apply
+```
+
+Terraform uploads the datasets and Glue scripts as part of the apply, so there's
+nothing to copy into S3 by hand.
+
+### 3. Run the pipeline
+
+```bash
+ARN=$(aws stepfunctions start-execution \
+  --state-machine-arn $(terraform output -raw state_machine_arn) \
+  --input file://examples/start-execution.json \
+  --query executionArn --output text)
+
+aws stepfunctions describe-execution --execution-arn $ARN --query status
+```
+
+Status hits `SUCCEEDED` after a few minutes, most of that Glue cluster start-up.
+Re-running is safe, but a successful run empties the raw zone, so restore from
+`archived/<timestamp>/` if you want to reprocess the same batch.
+
+## Querying
+
+Query through the `ecommerce-lakehouse-athena` workgroup. It pins its own results
+location, so anything you run from the default `primary` workgroup ends up
+somewhere else.
+
+```sql
+SELECT order_date, SUM(total_amount) AS revenue
+FROM ecommerce_lakehouse.orders
+GROUP BY order_date
+ORDER BY order_date;
+```
+
+## Teardown
+
+```bash
+terraform destroy
+```
+
+The Athena workgroup needs `force_destroy`. Query execution history is enough to
+count as non-empty, which isn't obvious from the error you get back. The state
+bucket keeps `prevent_destroy`, so removing it is a manual step.

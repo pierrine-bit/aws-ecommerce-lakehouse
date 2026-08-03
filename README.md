@@ -38,6 +38,16 @@ flowchart TD
 
 Stages run sequentially, each gated on the one before it.
 
+| Stage | Service | Purpose |
+| ----- | ------- | ------- |
+| 1 · ETL | Glue Spark | Validate, deduplicate, merge into Delta tables |
+| 2 · Quality gate | Glue Python shell | Prove the tables exist, are catalogued, and are fresh |
+| 3 · Crawler | Glue Delta crawler | Keep Catalog schemas in step with the tables |
+| 4 · Row check | Athena | Confirm every table is non-empty |
+| 5 · Archival | Lambda | Move consumed raw files out of the landing zone |
+
+**Design guarantees**
+
 - **Idempotent** — `MERGE` on business keys, so replaying a batch converges
   rather than duplicating rows.
 - **Fail-closed** — raw files are archived only after the curated tables are

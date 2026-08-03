@@ -9,24 +9,34 @@ automated tests and Terraform validation on every push.
 
 ## Architecture
 
-```mermaid
-flowchart TD
-    RAW[("S3 · raw/")] --> ETL
+```text
+        S3 Raw
+           │
+           ▼
+┌───────────────────────┐
+│ AWS Step Functions    │
+│                       │
+│ 1. Glue Spark ETL     │
+│ 2. Quality Gate       │
+│ 3. Glue Crawler       │
+│ 4. Athena Validation  │
+│ 5. Archive Files      │
+└───────────────────────┘
+      │           │
+      │           └────────► S3 Rejected
+      ▼
+ Delta Lake
+      │
+      ▼
+Glue Catalog
+      │
+      ▼
+ Athena
+      │
+      ▼
+ S3 Archived
 
-    subgraph SFN["Step Functions"]
-        ETL["1 · Glue Spark ETL"]
-        GATE["2 · Quality gate"]
-        CRAWL["3 · Delta crawler"]
-        CHECK["4 · Athena row check"]
-        ARCHIVE["5 · Lambda archival"]
-        ETL --> GATE --> CRAWL --> CHECK --> ARCHIVE
-    end
-
-    ETL --> DWH[("S3 · lakehouse-dwh/")]
-    ETL -.->|invalid rows| REJ[("S3 · rejected/")]
-    DWH --> CAT[("Glue Catalog · Athena")]
-    ARCHIVE --> ARC[("S3 · archived/")]
-    SFN -.......->|failure| ALERT["EventBridge · SNS"]
+Failure ─────────► EventBridge → SNS
 ```
 
 Each stage depends on the one before it. If something fails the workflow stops and
@@ -64,26 +74,38 @@ aws-ecommerce-lakehouse/
 
 ## Data model
 
-```mermaid
-erDiagram
-    PRODUCTS ||--o{ ORDER_ITEMS : supplies
-    ORDERS   ||--o{ ORDER_ITEMS : contains
-
-    PRODUCTS {
-        bigint product_id PK "merge key"
-        string department "partition"
-    }
-    ORDERS {
-        bigint order_id PK "merge key"
-        date order_date "partition"
-    }
-    ORDER_ITEMS {
-        bigint id PK "merge key"
-        bigint order_id FK
-        bigint product_id FK
-        date order_date "partition"
-    }
+```text
+┌──────────────────────────────────────────┐
+│                 PRODUCTS                 │
+├──────────────────────────────────────────┤
+│ bigint  product_id     PK (Merge Key)    │
+│ string  department     Partition Key     │
+└──────────────────────────────────────────┘
+                     │
+                     │ 1 product supplies N order items
+                     ▼
+┌──────────────────────────────────────────┐
+│               ORDER_ITEMS                │
+├──────────────────────────────────────────┤
+│ bigint  id             PK (Merge Key)    │
+│ bigint  order_id       FK → ORDERS       │
+│ bigint  product_id     FK → PRODUCTS     │
+│ bigint  user_id                          │
+│ date    order_date     Partition Key     │
+└──────────────────────────────────────────┘
+                     ▲
+                     │ 1 order contains N order items
+                     │
+┌──────────────────────────────────────────┐
+│                  ORDERS                  │
+├──────────────────────────────────────────┤
+│ bigint  order_id       PK (Merge Key)    │
+│ date    order_date     Partition Key     │
+└──────────────────────────────────────────┘
 ```
+
+Only merge keys, partition keys and foreign keys are shown; each table carries
+further attribute columns.
 
 Sources are `products.csv`, `orders_apr_2025.xlsx` and
 `order_items_apr_2025.xlsx`. Each order item points at both an order and a product,

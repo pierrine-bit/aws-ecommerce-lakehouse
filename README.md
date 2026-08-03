@@ -109,6 +109,26 @@ pass on a log left by an earlier run, even if today's wrote nothing.
 tolerates an already-running crawler, and routes every other error to a terminal
 failure state that raises an alert.
 
+**Alerting** — two EventBridge rules publish to an SNS topic: one for the state
+machine entering `FAILED`, `TIMED_OUT`, or `ABORTED`, and one for either Glue job
+failing or timing out, whether the pipeline invoked it or someone ran it by hand.
+The second rule matters because a manually triggered job failure would otherwise
+be silent.
+
+---
+
+## Security
+
+Three narrowly scoped IAM roles — Glue, Lambda, and Step Functions — rather than
+one shared role, each limited to the S3 prefixes, Catalog resources, and job ARNs
+it needs. The archival Lambda can read and delete only under `raw/` and write only
+under `archived/`, so it has no access to curated data at all. Athena executes as
+the Step Functions role, which is what carries the Catalog read and results-write
+permissions.
+
+The lakehouse bucket enforces SSE-S3 encryption, versioning, and a full
+public-access block. Terraform state is likewise encrypted, versioned, and locked.
+
 ---
 
 ## Deployment
@@ -225,3 +245,15 @@ Two constraints, both encoded in the configuration:
   only, not the S3 API — and since the bucket has versioning without
   `force_destroy`, every object version must be removed before it can be deleted
   at all.
+
+---
+
+## Known limitations
+
+Ingestion is batch and manually triggered; an S3 notification or schedule would
+make it event-driven. XLSX parsing happens on the Spark driver, so it does not
+scale beyond driver memory — converting sources to CSV or Parquet upstream would
+remove the ceiling. The state bucket name is hard-coded, as Terraform forbids
+variables in `backend` blocks. The quality gate validates presence and freshness
+but not distributions; column profiling would deepen it. Delta `OPTIMIZE` and
+`VACUUM` are unscheduled, so small files accumulate across many incremental runs.

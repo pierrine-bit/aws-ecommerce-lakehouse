@@ -178,41 +178,31 @@ state bucket keeps `prevent_destroy` and is removed deliberately, not by
 
 ## Repository layout
 
-Infrastructure, in the order the pipeline runs:
-
 ```text
+aws-ecommerce-lakehouse/
 ├── main.tf
 ├── glue.tf
 ├── step_functions.tf
 ├── lambda.tf
 ├── alerts.tf
-└── iam.tf
-```
-
-Terraform configuration:
-
-```text
+├── iam.tf
 ├── variables.tf
 ├── outputs.tf
 ├── providers.tf
 ├── versions.tf
 ├── terraform.tfvars.example
-└── bootstrap/
-```
-
-Job code, data, and verification:
-
-```text
+├── requirements-dev.txt
+├── bootstrap/
+├── data/
+├── examples/
+├── tests/
 ├── glue_scripts/
 │   ├── lakehouse_delta_etl.py
 │   └── quality_checks.py
 ├── lambda/
 │   └── archive_files.py
-├── data/
-├── examples/
-├── tests/
-├── requirements-dev.txt
-└── .github/workflows/ci.yml
+└── .github/workflows/
+    └── ci.yml
 ```
 
 ## Known limitations

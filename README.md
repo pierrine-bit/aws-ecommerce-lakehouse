@@ -10,9 +10,9 @@ automated tests and Terraform validation on every push.
 ## Architecture
 
 ```text
-        S3 Raw
-           │
-           ▼
+          S3 Raw
+            │
+            ▼
 ┌───────────────────────┐
 │ AWS Step Functions    │
 │                       │
@@ -23,20 +23,18 @@ automated tests and Terraform validation on every push.
 │ 5. Archive Files      │
 └───────────────────────┘
       │           │
-      │           └────────► S3 Rejected
+      │           ├──────► S3 Rejected   (invalid rows)
+      │           └──────► S3 Archived   (consumed raw files)
       ▼
- Delta Lake
+  Delta Lake
       │
       ▼
-Glue Catalog
+ Glue Catalog
       │
       ▼
- Athena
-      │
-      ▼
- S3 Archived
+    Athena
 
-Failure ─────────► EventBridge → SNS
+Failure at any stage ──────► EventBridge → SNS
 ```
 
 Each stage depends on the one before it. If something fails the workflow stops and

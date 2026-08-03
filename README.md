@@ -191,6 +191,7 @@ iam.tf               least-privilege roles and policies
 lambda.tf            archival function
 main.tf              S3 bucket, hardening, lifecycle rules, data uploads
 outputs.tf           bucket, database, workgroup, state machine ARN
+providers.tf         AWS provider region
 step_functions.tf    state machine definition
 variables.tf         input variables
 versions.tf          provider constraints and S3 backend

@@ -14,25 +14,29 @@ layer is verified.
 
 ## Architecture
 
-```text
-  Raw files (CSV / XLSX)
-          │  uploaded by Terraform
-          ▼
-      S3  raw/
-          │
-          ▼
-  ┌────────────────────────────────────────────────────┐
-  │  Step Functions                                    │
-  │                                                    │
-  │   1  Glue Spark ETL       →  lakehouse-dwh/        │
-  │   2  Quality gate                                  │
-  │   3  Delta crawler        →  Glue Data Catalog     │
-  │   4  Athena row check                              │
-  │   5  Lambda archival      →  archived/<timestamp>/ │
-  └────────────────────────┬───────────────────────────┘
-                           │  failure, timeout, or abort
-                           ▼
-                  EventBridge  →  SNS  →  email
+```mermaid
+flowchart TD
+    SRC["Raw files<br/>CSV / XLSX"] -->|uploaded by Terraform| RAW[("S3 · raw/")]
+
+    subgraph SFN["Step Functions state machine"]
+        direction TB
+        ETL["1 · Glue Spark ETL"]
+        GATE["2 · Quality gate"]
+        CRAWL["3 · Delta crawler"]
+        CHECK["4 · Athena row check"]
+        ARCHIVE["5 · Lambda archival"]
+        ETL --> GATE --> CRAWL --> CHECK --> ARCHIVE
+    end
+
+    RAW --> ETL
+    ETL --> DWH[("S3 · lakehouse-dwh/<br/>Delta tables")]
+    ETL -.->|invalid rows| REJ[("S3 · rejected/")]
+    CRAWL --> CAT[("Glue Data Catalog")]
+    CAT --> ATHENA["Athena"]
+    ARCHIVE --> ARC[("S3 · archived/")]
+
+    SFN -.->|failure · timeout · abort| EB["EventBridge"]
+    EB --> SNS["SNS → email"]
 ```
 
 Stages run sequentially, each gated on the one before it.

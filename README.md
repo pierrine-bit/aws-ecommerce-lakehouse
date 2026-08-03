@@ -16,6 +16,19 @@ quarantined with their rejection reason instead of filtered away, and the raw
 zone is only cleared after the curated tables have been independently proven to
 hold queryable data.
 
+**Contents** ·
+[Architecture](#architecture) ·
+[Design decisions](#design-decisions) ·
+[Data model](#data-model) ·
+[How the pipeline works](#how-the-pipeline-works) ·
+[Deployment](#deployment) ·
+[Configuration](#configuration) ·
+[Querying](#querying) ·
+[Testing and CI](#testing-and-ci) ·
+[Teardown](#teardown) ·
+[Reference](#reference) ·
+[Known limitations](#known-limitations)
+
 ---
 
 ## Architecture
@@ -44,7 +57,7 @@ hold queryable data.
 Stages execute sequentially, each conditional on the one before it. Any failure
 short-circuits to a terminal state, which is itself an observable event.
 
-**Guarantees the design provides**
+### Guarantees the design provides
 
 - **Idempotent re-runs.** `MERGE` on business keys means replaying a batch
   converges on the same tables rather than duplicating rows.
@@ -58,7 +71,7 @@ short-circuits to a terminal state, which is itself an observable event.
 
 ---
 
-## Engineering decisions
+## Design decisions
 
 | Decision | Rationale | Accepted cost |
 | -------- | --------- | ------------- |
@@ -73,9 +86,10 @@ short-circuits to a terminal state, which is itself an observable event.
 
 ## Data model
 
-Sources: `products.csv`, `orders_apr_2025.xlsx`, `order_items_apr_2025.xlsx`.
-Schemas are declared explicitly rather than inferred, so an upstream rename or
-type drift fails loudly at read time instead of propagating downstream.
+Sources are `products.csv`, `orders_apr_2025.xlsx`, and
+`order_items_apr_2025.xlsx`. Schemas are declared explicitly rather than
+inferred, so an upstream rename or type drift fails loudly at read time instead
+of propagating downstream.
 
 | Table | Merge key | Partitioned by | Referential integrity |
 | ----- | --------- | -------------- | --------------------- |
@@ -87,6 +101,8 @@ Partition columns follow the dominant access patterns — product analysis by
 department, revenue by date — so Athena prunes partitions instead of scanning
 whole tables.
 
+### Bucket layout
+
 ```text
 raw/                 landing zone
 lakehouse-dwh/       curated Delta tables
@@ -96,36 +112,94 @@ scripts/             job code
 athena-results/      query output
 ```
 
-The bucket enforces versioning, SSE-S3 encryption, and a full public-access
-block. Lifecycle rules bound growth on `archived/`, `rejected/`, noncurrent
-versions, and abandoned multipart uploads.
+Versioning, SSE-S3 encryption, and a full public-access block are enforced.
+Lifecycle rules bound growth on `archived/`, `rejected/`, noncurrent versions,
+and abandoned multipart uploads.
 
 ---
 
-## Pipeline
+## How the pipeline works
 
-**ETL** — Glue 4.0 Spark on two `G.1X` workers. Datasets are processed in
-dependency order, products through orders to order items, the last validated
-against the two tables written before it. Per dataset: read against an explicit
-schema, normalise types so unparseable numerics become SQL `NULL` rather than
-`NaN`, assert required columns, split valid from invalid on null business keys
-and business rules, resolve referential integrity by semi- and anti-join,
-deduplicate on the merge key, then `MERGE` into Delta and register in the
-Catalog. Read, rejected, and written counts are logged per dataset, making a
-run's lineage reconstructable from CloudWatch alone.
+### ETL
 
-**Quality gate** — a 1-DPU Glue Python shell job asserting that each table holds
-a Delta transaction log, is registered in the Catalog, and carries a commit no
-older than `max_data_age_hours`. Freshness is the load-bearing check: presence
-alone would pass on a transaction log left by a previous successful run, even if
-today's run wrote nothing at all.
+Glue 4.0 Spark on two `G.1X` workers. Datasets are processed in dependency
+order — products, then orders, then order items, the last validated against the
+two tables written before it. Per dataset:
 
-**Orchestration** — a STANDARD state machine with layered resilience. Glue tasks
-retry twice with exponential backoff, the Lambda three times on the
-AWS-recommended transient error set, and the crawler stage catches
-`Glue.CrawlerRunningException` and proceeds rather than failing a run because a
-previous crawl is still finishing. Every other error routes to a terminal failure
-state, so no path is unhandled.
+1. Read against an explicit schema.
+2. Normalise types, so unparseable numerics become SQL `NULL` rather than `NaN`.
+3. Assert required columns are present.
+4. Split valid from invalid on null business keys and business rules.
+5. Resolve referential integrity by semi- and anti-join.
+6. Deduplicate on the merge key.
+7. `MERGE` into Delta and register the table in the Catalog.
+
+Read, rejected, and written counts are logged per dataset, making a run's lineage
+reconstructable from CloudWatch alone.
+
+### Quality gate
+
+A 1-DPU Glue Python shell job asserting that each table holds a Delta
+transaction log, is registered in the Catalog, and carries a commit no older than
+`max_data_age_hours`. Freshness is the load-bearing check: presence alone would
+pass on a transaction log left by a previous successful run, even if today's run
+wrote nothing at all.
+
+### Orchestration
+
+A STANDARD state machine with layered resilience. Glue tasks retry twice with
+exponential backoff, the Lambda three times on the AWS-recommended transient
+error set, and the crawler stage catches `Glue.CrawlerRunningException` and
+proceeds rather than failing a run because a previous crawl is still finishing.
+Every other error routes to a terminal failure state, so no path is unhandled.
+
+---
+
+## Deployment
+
+Requires Terraform ≥ 1.10 (for `use_lockfile` state locking), AWS CLI v2, and
+Python 3.11 to run the tests.
+
+```bash
+aws configure
+aws sts get-caller-identity        # confirm the target account
+```
+
+### 1. Bootstrap the state backend
+
+A one-time configuration creating the versioned, encrypted bucket that holds
+Terraform state. Its name must match the `backend "s3"` block in `versions.tf`.
+
+```bash
+cd bootstrap
+
+cat > terraform.tfvars <<'EOF'
+aws_region        = "eu-west-1"
+state_bucket_name = "ecommerce-lakehouse-tfstate-<your-account-id>"
+EOF
+
+terraform init
+terraform apply
+cd ..
+```
+
+### 2. Deploy the lakehouse
+
+```bash
+cp terraform.tfvars.example terraform.tfvars    # then edit — see Configuration
+
+terraform init
+terraform validate
+terraform apply
+```
+
+### 3. Run the pipeline
+
+```bash
+aws stepfunctions start-execution \
+  --state-machine-arn $(terraform output -raw state_machine_arn) \
+  --input file://examples/start-execution.json
+```
 
 ---
 
@@ -152,49 +226,6 @@ link AWS sends before alerts arrive.
 
 ---
 
-## Getting started
-
-Requires Terraform ≥ 1.10 (for `use_lockfile` state locking), AWS CLI v2, and
-Python 3.11 to run the tests.
-
-### 1. Bootstrap the state backend
-
-One-time creation of the versioned, encrypted bucket holding Terraform state. Its
-name must match the `backend "s3"` block in `versions.tf`.
-
-```bash
-cd bootstrap
-
-cat > terraform.tfvars <<'EOF'
-aws_region        = "eu-west-1"
-state_bucket_name = "ecommerce-lakehouse-tfstate-<your-account-id>"
-EOF
-
-terraform init
-terraform apply
-cd ..
-```
-
-### 2. Deploy
-
-```bash
-cp terraform.tfvars.example terraform.tfvars    # then edit — see Configuration
-
-terraform init
-terraform validate
-terraform apply
-```
-
-### 3. Run the pipeline
-
-```bash
-aws stepfunctions start-execution \
-  --state-machine-arn $(terraform output -raw state_machine_arn) \
-  --input file://examples/start-execution.json
-```
-
----
-
 ## Querying
 
 ```sql
@@ -218,7 +249,7 @@ ORDER BY order_date;
 
 ---
 
-## Testing
+## Testing and CI
 
 ```bash
 pip install -r requirements-dev.txt
@@ -248,13 +279,28 @@ CI runs the tests first, so a logic regression fails fast, then
 terraform destroy
 ```
 
-The state bucket carries `prevent_destroy` and survives by design, since it must
-outlive the environments whose state it holds. Removing it is a deliberate manual
-step.
+Two constraints are worth knowing before tearing down, both encoded in the
+configuration:
+
+- **The Athena workgroup needs recursive deletion.** Athena treats a workgroup
+  holding query-execution history as non-empty and refuses to delete it, so
+  `force_destroy = true` is set on the resource.
+- **The state bucket is protected and survives by design.** It carries
+  `prevent_destroy` because it must outlive the environments whose state it
+  holds. Note that this guard binds Terraform only — the S3 API is not
+  constrained by it. The bucket also has no `force_destroy`, so every object
+  version must be removed before it can be deleted at all.
 
 ---
 
-## Repository layout
+## Reference
+
+### Outputs
+
+`s3_bucket` · `glue_database` · `glue_jobs` · `crawler_name` ·
+`athena_workgroup` · `state_machine_arn` · `pipeline_alerts_topic_arn`
+
+### Repository layout
 
 ```text
 bootstrap/           one-time S3 state backend
@@ -271,6 +317,8 @@ step_functions.tf    state machine definition
 versions.tf          provider constraints and S3 backend
 ```
 
+---
+
 ## Known limitations
 
 Ingestion is batch and manually triggered; an S3 notification or schedule would
@@ -281,3 +329,7 @@ variables in backend blocks; partial backend configuration would make it portabl
 across accounts. The gate validates presence and freshness but not distributions,
 and Delta `OPTIMIZE`/`VACUUM` are unscheduled, so small files accumulate over
 many incremental runs.
+
+---
+
+Licensed under the [MIT License](LICENSE).

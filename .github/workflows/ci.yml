@@ -17,6 +17,11 @@ on:
         options:
           - plan
           - apply
+          - destroy
+      confirm:
+        description: "Type DESTROY to authorise a destroy run (ignored otherwise)"
+        required: false
+        default: ""
 
 jobs:
   validate:
@@ -78,6 +83,13 @@ jobs:
       cancel-in-progress: false
 
     steps:
+      # Fail before touching AWS if a destroy was not explicitly authorised.
+      - name: Check destroy confirmation
+        if: github.event.inputs.action == 'destroy' && github.event.inputs.confirm != 'DESTROY'
+        run: |
+          echo "::error::Set 'confirm' to DESTROY to authorise a destroy run."
+          exit 1
+
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -97,12 +109,27 @@ jobs:
         run: terraform init -input=false
 
       - name: Terraform plan
+        if: github.event.inputs.action != 'destroy'
         env:
           TF_VAR_alert_email: ${{ secrets.ALERT_EMAIL }}
         run: terraform plan -input=false -out=tfplan
 
       - name: Terraform apply
         if: github.event.inputs.action == 'apply'
+        env:
+          TF_VAR_alert_email: ${{ secrets.ALERT_EMAIL }}
+        run: terraform apply -input=false -auto-approve tfplan
+
+      # Planned first so the log records exactly what is about to be removed,
+      # then applied from that saved plan rather than re-resolving it.
+      - name: Terraform destroy plan
+        if: github.event.inputs.action == 'destroy'
+        env:
+          TF_VAR_alert_email: ${{ secrets.ALERT_EMAIL }}
+        run: terraform plan -destroy -input=false -out=tfplan
+
+      - name: Terraform destroy
+        if: github.event.inputs.action == 'destroy'
         env:
           TF_VAR_alert_email: ${{ secrets.ALERT_EMAIL }}
         run: terraform apply -input=false -auto-approve tfplan

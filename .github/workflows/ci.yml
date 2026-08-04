@@ -5,8 +5,7 @@ on:
     branches: ["main"]
   pull_request:
     branches: ["main"]
-  # Deploys are manual: a bad merge should never reach AWS before someone has
-  # read the plan.
+    
   workflow_dispatch:
     inputs:
       action:
@@ -18,10 +17,6 @@ on:
           - plan
           - apply
           - destroy
-      confirm:
-        description: "Type DESTROY to authorise a destroy run (ignored otherwise)"
-        required: false
-        default: ""
 
 jobs:
   validate:
@@ -69,27 +64,16 @@ jobs:
     needs: validate
     runs-on: ubuntu-latest
 
-    # Holds AWS_ROLE_ARN and ALERT_EMAIL. Add required reviewers here to make
-    # an apply wait for approval.
     environment: production
 
     permissions:
       contents: read
 
-    # Terraform 1.10 native S3 locking fails a concurrent run rather than
-    # corrupting state, but queueing is friendlier than a lock error.
     concurrency:
       group: lakehouse-terraform
       cancel-in-progress: false
 
     steps:
-      # Fail before touching AWS if a destroy was not explicitly authorised.
-      - name: Check destroy confirmation
-        if: github.event.inputs.action == 'destroy' && github.event.inputs.confirm != 'DESTROY'
-        run: |
-          echo "::error::Set 'confirm' to DESTROY to authorise a destroy run."
-          exit 1
-
       - name: Checkout
         uses: actions/checkout@v4
 
